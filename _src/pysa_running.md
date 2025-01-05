@@ -58,32 +58,32 @@ Notice the following:
 ### 2. Taint Config
 
 ```python
-# static_analysis_example/stubs/taint/taint.config
+# static_analysis_example/stubs/taint/core_privacy_security/taint.config
 
 {
-  sources: [
+  "sources": [
     {
-      name: "UserControlled",
-      comment: "use to annotate user input"
+      "name": "UserControlled",
+      "comment": "use to annotate user input"
     }
   ],
 
-  sinks: [
+  "sinks": [
     {
-      name: "RemoteCodeExecution",
-      comment: "use to annotate execution of code"
+      "name": "RemoteCodeExecution",
+      "comment": "use to annotate execution of code"
     }
   ],
 
-  features: [],
+  "features": [],
 
-  rules: [
+  "rules": [
     {
-      name: "Possible shell injection",
-      code: 5001,
-      sources: [ "UserControlled" ],
-      sinks: [ "RemoteCodeExecution" ],
-      message_format: "Data from [{$sources}] source(s) may reach [{$sinks}] sink(s)"
+      "name": "Possible shell injection",
+      "code": 5001,
+      "sources": [ "UserControlled" ],
+      "sinks": [ "RemoteCodeExecution" ],
+      "message_format": "Data from [{$sources}] source(s) may reach [{$sinks}] sink(s)"
     }
   ]
 }
@@ -96,7 +96,7 @@ also tell Pysa that data flowing from a `UserControlled` source to a
 ### 3. Taint Models
 
 ```python
-# static_analysis_example/stubs/taint/general.pysa
+# static_analysis_example/stubs/taint/core_privacy_security/general.pysa
 
 # model for raw_input
 def input(__prompt) -> TaintSource[UserControlled]: ...

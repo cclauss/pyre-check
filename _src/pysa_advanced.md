@@ -210,6 +210,65 @@ of `ReturnPath`. For instance:
 def MyClass.updates_foo(self, x: TaintInTaintOut[Updates[self], UpdatePath[_.foo]]): ...
 ```
 
+## Taint propagation from arguments to self
+
+By default, Pysa only infers taint propagation from arguments to self for
+constructors, property setters and the special `__setitem__` method.
+
+For instance:
+```python
+class Foo:
+  def __init__(self, x):
+    self.x = x
+
+  def set_x(self, x):
+    self.x = x
+
+def issue():
+  foo = Foo(source())
+  sink(foo)  # Issue found.
+
+  foo = Foo("")
+  foo.set_x(source())
+  sink(foo)  # Issue NOT found.
+```
+
+To enable the inference of propagations from arguments to self for all methods,
+one can provide the command line argument `--infer-self-tito` or use the taint
+annotation `@InferSelfTito` in a `.pysa` file:
+```python
+@InferSelfTito
+def my_module.Foo.set_x(): ...
+```
+Pysa would now find the second issue properly. Note that `--infer-self-tito` can
+significantly increase the analysis time as well as the amount of false positives.
+
+## Taint propagation between arguments
+
+By default, Pysa does NOT infer taint propagation between arguments. For short,
+it assumes that functions do not mutate their arguments.
+
+For instance, this flow will NOT be found:
+```python
+def append_wrapper(l: List[str], v: str) -> None:
+  l.append(v)
+
+def issue():
+  l = []
+  append_wrapper(l, source())
+  sink(l[0])  # Issue NOT found.
+```
+
+To enable the inference of propagations between arguments for all functions and
+methods, one can provide the command line argument `--infer-argument-tito` or
+use the taint annotation `@InferArgumentTito` in a `.pysa` file:
+```python
+@InferSelfTito
+def my_module.append_wrapper(): ...
+```
+Pysa would now find the issue properly. Note that `--infer-argument-tito` can
+significantly increase the analysis time as well as the amount of false positives.
+
 ## Taint broadening
 
 **Taint broadening** is an over-approximation performed by the taint analysis
@@ -547,17 +606,16 @@ Note that string literal sinks have some limitations. For instance, they cannot 
 
 ## Combined Source Rules
 
-Some security vulnerabilities are better modeled as *multiple* sources reaching
-a sink. For example, leaking credentials via `requests.get` could be modeled as
+Some security vulnerabilities are better modeled as *two* sources reaching
+sinks at the same call site. For example, leaking credentials via `requests.get` could be modeled as
 user controlled data flowing into the `url` parameter and credentials flowing
 into the `params` parameter. These flows can be modeled by *combined source
 rules*.
 
 Sources for combined source rules are declared as normal in `taint.config`.
-Sinks, however, need to be unique to the combined source rule and are declared inside
-the rule definition. The rule itself is declared in the `combined_source_rules`
-top level entry. The rule lists all the same things as a regular rule, but also ties
-labels to its sources:
+Sinks, however, are declared inside the rule definition, and are referred to as *partial sinks*.
+The rule itself is declared in the `combined_source_rules` top level entry.
+The actual flows are defined under section `rule`, which must contain two flows, one for each source. Each flow specifies a pair of (potentially multiple) sources and a single partial sink:
 
 ```json
 {
@@ -568,8 +626,16 @@ labels to its sources:
   "combined_source_rules": [
     {
        "name": "Credentials leaked through requests",
-       "sources": { "url": "UserControlled", "creds": "Credentials" },
-       "partial_sink": "UserControlledRequestWithCreds",
+       "rule": [
+        {
+           "sources": [ "UserControlled" ],
+           "partial_sink": "UserControlledRequestSink"
+         },
+         {
+           "sources": [ "Credentials" ],
+           "partial_sink": "CredentialsSink"
+         }
+       ],
        "code": 1,
        "message_format": "Credentials leaked through requests",
        "main_trace_source": "url",
@@ -581,29 +647,21 @@ labels to its sources:
 Sources are declared as normal in `.pysa` files. Instead of specifying sinks
 with a `TaintSink` annotation, however, `PartialSink` annotations are used to
 specify where each source needs to flow for the combined source rule. These
-`PartialSink` must reference the labels that were declared in
-`multi_sink_labels`:
+`PartialSink` must reference the ones that were declared by
+the rule above:
 
 ```python
 def requests.api.get(
-  url: PartialSink[UserControlledRequestWithCreds[url]],
-  params: PartialSink[UserControlledRequestWithCreds[creds]],
+  url: PartialSink[UserControlledRequestSink],
+  params: PartialSink[CredentialsSink],
   **kwargs
 ): ...
 ```
 
 With the above configuration, Pysa can detect cases where `UserControlled` flows
-into `url` and `Credentials` flow into `params` *at the same time*.
+into `url` and `Credentials` flow into `params` *at the same time* (or at the same call site).
 
-The optional attribute `main_trace_source` can be used to specify which flow should be shown as the main flow in the SAPP UI. For example, in the above rule, the flow from source `UserControlled` to sink `UserControlledRequestWithCreds` is the main flow.
-
-The SAPP UI only shows a single flow at a time. However, an issue for a combined source rule corresponds to two flows. For example, for the above rule, an issue is filed only if there exist
-- One flow from source `UserControlled` to sink `UserControlledRequestWithCreds`, and
-- Another flow from source `Credentials` to sink `UserControlledRequestWithCreds`.
-
-For combined source issues, Pysa will always show the main flow, and provide the secondary flow as a subtrace that can be expanded in the UI.
-
-When attribute `main_trace_source` is missing, Pysa treat the sources under the first tag as the main sources.
+Note that the same partial sink can be used in different rules, which avoids duplicating a given model for each rule (in some cases).
 
 ## String Combine Rules
 
@@ -611,8 +669,8 @@ It is sometimes useful to detect data tainted with a source (e.g., `UserControll
 
 To detect such flows, one can specify a variant of [combined source rules](#combined-source-rules), called string combine rules, to detect when the suspicious string (identified via regex match) and the other configured source both flow into string formatting call sites (such as calling `str.__add__`, `str.__mod__`, `str.format` or constructing f-strings).
 
-For example, to detect flows from source `UserControlled` to sink `StringMayBeSQL`, one should specify the following contents in the taint configuration file, where `UserControlled` is declared as a main source and `StringMayBeSQL` is declared as a secondary source:
-```python
+For example, to detect flows from source `UserControlled` to sink `StringMayBeSQL`, one should specify the following contents in the taint configuration file, where `UserControlled` and `StringMayBeSQL` are both declared as sources:
+```json
 {
   "sources": [
     { "name": "UserControlled" },
@@ -630,16 +688,23 @@ For example, to detect flows from source `UserControlled` to sink `StringMayBeSQ
   "string_combine_rules": [
     {
        "name": "User controlled data flows into potential SQL strings",
-       "main_sources": "UserControlled",
-       "secondary_sources": "StringMayBeSQL",
-       "partial_sink": "UserControlledDataAndStringMayBeSQL",
+       "rule": [
+        {
+           "sources": [ "UserControlled" ],
+           "partial_sink": "UserControlledDataSink"
+         },
+         {
+           "sources": [ "StringMayBeSQL" ],
+           "partial_sink": "StringMayBeSQLSink"
+         }
+       ],
        "code": 4324,
        "message_format": "User controlled data flows into potential SQL strings"
     }
   ]
 }
 ```
-As shown above, one needs to additionally specify a (unique) partial sink kind (such as `UserControlledDataAndStringMayBeSQL`), which will be automatically introduced onto the actual arguments at string formatting call sites.
+As shown above, the syntax is similar to that of [combined source rules](#combined-source-rules), especially for section `rule`.
 
 The above rule enables catching the following flows:
 ```python
@@ -727,7 +792,7 @@ method.
 
 By default, Pysa skips overrides on some functions that are typically
 problematic. You can find the full list of default-skipped functions in
-[`stubs/taint/skipped_overrides.pysa`](https://github.com/facebook/pyre-check/blob/main/stubs/taint/skipped_overrides.pysa)
+[`stubs/taint/common/skipped_overrides.pysa`](https://github.com/facebook/pyre-check/blob/main/stubs/taint/common/skipped_overrides.pysa)
 
 ## Force to analyze all overrides
 
@@ -765,6 +830,34 @@ This option can also be added in the `taint.config` as follows:
 
 Note that this is not a silver bullet and that this might hide security
 vulnerabilities. Use it with caution.
+
+## Limit the trace length for a given rule
+
+Similarly to the option described above, one can limit the trace length
+for a given rule, using the `filters` option:
+
+```
+"rules": [
+  {
+    "name": "SQL injection.",
+    "code": 1,
+    "sources": [ "UserControlled" ],
+    "sinks": [ "SQL" ],
+    "message_format": "Data from [{$sources}] source(s) may reach [{$sinks}] sink(s)",
+    "filters": {
+      "maximum_source_distance": 10,
+      "maximum_sink_distance": 5
+    }
+  }
+]
+```
+
+This will limit the trace length from the root to the source by 10, and the
+trace length from the root to the sink by 5, only for that specific rule.
+
+**Note**: This is meant to be used to limit the number of issues written to the
+database. Prefer using [SAPP](https://github.com/facebook/sapp#readme) to
+filter out false positives.
 
 ## Limit the tito depth for better signal and performance
 
